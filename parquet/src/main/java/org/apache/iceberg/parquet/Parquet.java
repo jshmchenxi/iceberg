@@ -1222,6 +1222,14 @@ public class Parquet {
           optionsBuilder.withDecryption(fileDecryptionProperties);
         }
 
+        // TODO: for now, apply filter only for non-vectorized read
+        if (filter != null && batchedReaderFunc == null) {
+          Schema fileSchema = getSchemaFromFile(fileDecryptionProperties);
+          optionsBuilder.useRecordFilter();
+          optionsBuilder.withRecordFilter(
+              ParquetFilters.convert(fileSchema, filter, caseSensitive));
+        }
+
         ParquetReadOptions options = optionsBuilder.build();
 
         NameMapping mapping;
@@ -1275,18 +1283,7 @@ public class Parquet {
       if (filter != null) {
         // TODO: should not need to get the schema to push down before opening the file.
         // Parquet should allow setting a filter inside its read support
-        ParquetReadOptions decryptOptions =
-            ParquetReadOptions.builder(new PlainParquetConfiguration())
-                .withDecryption(fileDecryptionProperties)
-                .build();
-        MessageType type;
-        try (ParquetFileReader schemaReader =
-            ParquetFileReader.open(ParquetIO.file(file), decryptOptions)) {
-          type = schemaReader.getFileMetaData().getSchema();
-        } catch (IOException e) {
-          throw new RuntimeIOException(e);
-        }
-        Schema fileSchema = ParquetSchemaUtil.convert(type);
+        Schema fileSchema = getSchemaFromFile(fileDecryptionProperties);
         builder
             .useStatsFilter()
             .useDictionaryFilter()
@@ -1319,6 +1316,22 @@ public class Parquet {
       }
 
       return new ParquetIterable<>(builder);
+    }
+
+    private Schema getSchemaFromFile(FileDecryptionProperties fileDecryptionProperties) {
+      ParquetReadOptions decryptOptions =
+          ParquetReadOptions.builder(new PlainParquetConfiguration())
+              .withDecryption(fileDecryptionProperties)
+              .build();
+      MessageType type;
+      try (ParquetFileReader schemaReader =
+          ParquetFileReader.open(ParquetIO.file(file), decryptOptions)) {
+        type = schemaReader.getFileMetaData().getSchema();
+      } catch (IOException e) {
+        throw new RuntimeIOException(e);
+      }
+
+      return ParquetSchemaUtil.convert(type);
     }
   }
 
