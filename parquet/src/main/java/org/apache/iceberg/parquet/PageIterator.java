@@ -203,6 +203,7 @@ abstract class PageIterator<T> extends BasePageIterator implements TripleIterato
     }
   }
 
+  @Override
   protected void skip(int numValuesToSkip) {
     values.skip(numValuesToSkip);
   }
