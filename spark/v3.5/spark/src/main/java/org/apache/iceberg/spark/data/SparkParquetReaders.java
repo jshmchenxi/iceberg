@@ -198,7 +198,7 @@ public class SparkParquetReaders {
       int repeatedD;
       int repeatedR;
 
-      if (type.isRepetition(Type.Repetition.REPEATED)) {
+      if (ParquetSchemaUtil.isOldListElementType(array)) {
         repeatedD = type.getMaxDefinitionLevel(repeatedPath);
         repeatedR = type.getMaxRepetitionLevel(repeatedPath);
       } else {
