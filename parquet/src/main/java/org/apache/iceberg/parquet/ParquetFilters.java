@@ -250,6 +250,7 @@ class ParquetFilters {
         case LONG:
         case TIME:
         case TIMESTAMP:
+        case TIMESTAMP_NANO:
           return "long";
         case FLOAT:
           return "float";
