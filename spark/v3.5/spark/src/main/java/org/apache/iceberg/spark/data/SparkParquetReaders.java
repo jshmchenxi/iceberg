@@ -129,7 +129,9 @@ public class SparkParquetReaders {
     @Override
     public ParquetValueReader<?> message(
         Types.StructType expected, MessageType message, List<ParquetValueReader<?>> fieldReaders) {
-      return struct(expected, message.asGroupType(), fieldReaders);
+      StructReader struct = (StructReader) struct(expected, message.asGroupType(), fieldReaders);
+      struct.topLevel();
+      return struct;
     }
 
     @Override
