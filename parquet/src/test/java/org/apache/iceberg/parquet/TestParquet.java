@@ -33,6 +33,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
@@ -47,7 +48,6 @@ import org.apache.iceberg.avro.AvroSchemaUtil;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.relocated.com.google.common.base.Strings;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
-import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.types.Types.IntegerType;
@@ -200,23 +200,64 @@ public class TestParquet {
             .build();
 
     GenericRecordBuilder recordBuilder = new GenericRecordBuilder(avroSchema);
-    List<ByteBuffer> expectedByteList = Lists.newArrayList();
-    byte[] expectedByte = {0x00, 0x01};
-    ByteBuffer expectedBinary = ByteBuffer.wrap(expectedByte);
-    expectedByteList.add(expectedBinary);
-    recordBuilder.set("arraybytes", expectedByteList);
-    recordBuilder.set("topbytes", expectedBinary);
-    GenericData.Record expectedRecord = recordBuilder.build();
+    // Record 1: single element list, topbytes present
+    byte[] b1 = {0x00, 0x01};
+    ByteBuffer expectedBinary1 = ByteBuffer.wrap(b1);
+    List<ByteBuffer> expectedByteList1 = Collections.singletonList(expectedBinary1);
+    recordBuilder.set("arraybytes", expectedByteList1);
+    recordBuilder.set("topbytes", expectedBinary1);
+    writer.write(recordBuilder.build());
 
-    writer.write(expectedRecord);
+    // Record 2: empty list, topbytes null
+    recordBuilder = new GenericRecordBuilder(avroSchema);
+    recordBuilder.set("arraybytes", Collections.emptyList());
+    recordBuilder.set("topbytes", null);
+    writer.write(recordBuilder.build());
+
+    // Record 3: multi-element list, different topbytes
+    byte[] b2a = new byte[] {0x02, 0x03};
+    byte[] b2b = new byte[] {0x04, 0x05};
+    byte[] top = new byte[] {0x06, 0x07};
+    ByteBuffer expectedBinary2 = ByteBuffer.wrap(top);
+    List<ByteBuffer> expectedByteList2 = Arrays.asList(ByteBuffer.wrap(b2a), ByteBuffer.wrap(b2b));
+    recordBuilder = new GenericRecordBuilder(avroSchema);
+    recordBuilder.set("arraybytes", expectedByteList2);
+    recordBuilder.set("topbytes", expectedBinary2);
+    writer.write(recordBuilder.build());
+
+    // Record 4: null list (arraybytes omitted), topbytes present
+    recordBuilder = new GenericRecordBuilder(avroSchema);
+    recordBuilder.set("arraybytes", null);
+    recordBuilder.set("topbytes", expectedBinary1);
+    writer.write(recordBuilder.build());
+
     writer.close();
 
-    GenericData.Record recordRead =
-        Iterables.getOnlyElement(
+    List<GenericData.Record> recordsRead =
+        Lists.newArrayList(
             Parquet.read(Files.localInput(testFile)).project(schema).callInit().build());
 
-    assertThat(recordRead.get("arraybytes")).isEqualTo(expectedByteList);
-    assertThat(recordRead.get("topbytes")).isEqualTo(expectedBinary);
+    assertThat(recordsRead).hasSize(4);
+
+    // Record 1 assertions
+    GenericData.Record r1 = recordsRead.get(0);
+    assertThat(r1.get("arraybytes")).isEqualTo(expectedByteList1);
+    assertThat(r1.get("topbytes")).isEqualTo(expectedBinary1);
+
+    // Record 2 assertions
+    GenericData.Record r2 = recordsRead.get(1);
+    assertThat((List) r2.get("arraybytes")).isEmpty();
+    assertThat(r2.get("topbytes")).isNull();
+
+    // Record 3 assertions
+    GenericData.Record r3 = recordsRead.get(2);
+    assertThat(r3.get("arraybytes")).isEqualTo(expectedByteList2);
+    assertThat(r3.get("topbytes")).isEqualTo(expectedBinary2);
+
+    // Record 4 assertions
+    GenericData.Record r4 = recordsRead.get(3);
+    assertThat(r4.get("arraybytes")).isNull();
+    assertThat(r4.get("topbytes")).isEqualTo(expectedBinary1);
   }
 
   private Pair<File, Long> generateFile(

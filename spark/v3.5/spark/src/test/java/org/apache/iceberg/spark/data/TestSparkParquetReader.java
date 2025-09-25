@@ -19,6 +19,7 @@
 package org.apache.iceberg.spark.data;
 
 import static org.apache.iceberg.spark.data.TestHelpers.assertEqualsUnsafe;
+import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.apache.iceberg.types.Types.NestedField.required;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -26,10 +27,15 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.generic.GenericRecordBuilder;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
@@ -38,6 +44,7 @@ import org.apache.iceberg.MetricsConfig;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.avro.AvroSchemaUtil;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.hadoop.HadoopTables;
@@ -51,6 +58,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
+import org.apache.parquet.avro.AvroParquetWriter;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.api.WriteSupport;
 import org.apache.parquet.hadoop.util.HadoopOutputFile;
@@ -230,5 +238,81 @@ public class TestSparkParquetReader extends AvroDataTest {
     assertThatThrownBy(() -> writeAndValidate(writeSchema, expectedSchema))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Missing required field: missing_str");
+  }
+
+  @Test
+  public void testTwoLevelList() throws Exception {
+    // Mirror parquet TestParquet#testTwoLevelList: four record patterns
+    Schema schema =
+        new Schema(
+            optional(1, "arraybytes", Types.ListType.ofRequired(3, Types.BinaryType.get())),
+            optional(2, "topbytes", Types.BinaryType.get()));
+
+    org.apache.avro.Schema avroSchema = AvroSchemaUtil.convert(schema.asStruct());
+
+    File parquetFile = File.createTempFile("spark-two-level-list", ".parquet", temp.toFile());
+    assertThat(parquetFile.delete()).isTrue();
+
+    // Bytes used across records
+    byte[] b1 = new byte[] {0x00, 0x01};
+    ByteBuffer expectedBinary1 = ByteBuffer.wrap(b1);
+    List<ByteBuffer> expectedByteList1 = Collections.singletonList(expectedBinary1);
+
+    byte[] b2a = new byte[] {0x02, 0x03};
+    byte[] b2b = new byte[] {0x04, 0x05};
+    byte[] top = new byte[] {0x06, 0x07};
+    ByteBuffer expectedBinary2 = ByteBuffer.wrap(top);
+    List<ByteBuffer> expectedByteList2 = Arrays.asList(ByteBuffer.wrap(b2a), ByteBuffer.wrap(b2b));
+
+    List<GenericData.Record> expectedRecords = Lists.newArrayList();
+
+    try (ParquetWriter<GenericRecord> writer =
+        AvroParquetWriter.<GenericRecord>builder(
+                new org.apache.hadoop.fs.Path(parquetFile.getAbsolutePath()))
+            .withSchema(avroSchema)
+            .withDataModel(GenericData.get())
+            .config("parquet.avro.add-list-element-records", "true")
+            .config("parquet.avro.write-old-list-structure", "true")
+            .build()) {
+      GenericRecordBuilder builder = new GenericRecordBuilder(avroSchema);
+
+      // Record 1: single element list, topbytes present
+      builder.set("arraybytes", expectedByteList1);
+      builder.set("topbytes", expectedBinary1);
+      GenericData.Record r1 = builder.build();
+      writer.write(r1);
+      expectedRecords.add(r1);
+
+      // Record 2: empty list, topbytes null
+      builder = new GenericRecordBuilder(avroSchema);
+      builder.set("arraybytes", Collections.emptyList());
+      builder.set("topbytes", null);
+      GenericData.Record r2 = builder.build();
+      writer.write(r2);
+      expectedRecords.add(r2);
+
+      // Record 3: multi-element list, different topbytes
+      builder = new GenericRecordBuilder(avroSchema);
+      builder.set("arraybytes", expectedByteList2);
+      builder.set("topbytes", expectedBinary2);
+      GenericData.Record r3 = builder.build();
+      writer.write(r3);
+      expectedRecords.add(r3);
+
+      // Record 4: null list (arraybytes omitted), topbytes present
+      builder = new GenericRecordBuilder(avroSchema);
+      builder.set("arraybytes", null);
+      builder.set("topbytes", expectedBinary1);
+      GenericData.Record r4 = builder.build();
+      writer.write(r4);
+      expectedRecords.add(r4);
+    }
+
+    List<InternalRow> rows = rowsFromFile(Files.localInput(parquetFile), schema);
+    assertThat(rows).hasSize(expectedRecords.size());
+
+    for (int i = 0; i < expectedRecords.size(); i++) {
+      assertEqualsUnsafe(schema.asStruct(), expectedRecords.get(i), rows.get(i));
+    }
   }
 }
