@@ -393,6 +393,17 @@ public class TestSparkParquetPageSkipping {
   }
 
   @TestTemplate
+  public void testSinglePageMatchStringColumnStartsWith() {
+    // Parquet startsWith predicate is also tested using page min / max stats
+    Expression filter = Expressions.startsWith("_string", "zz");
+
+    // row-group 1
+    // page-1                         0  2kcdhDuRL0Z46!zwp(...)LK2GpbAXN0.oRHABMh  zzBYX?HiWMlMn
+    List<GenericData.Record> expected = selectRecords(allRecords, Pair.of(608, 627));
+    readAndValidate(filter, expected, rowGroup1);
+  }
+
+  @TestTemplate
   public void testMultiplePagesMatch() {
     Expression filter =
         Expressions.or(
@@ -437,6 +448,19 @@ public class TestSparkParquetPageSkipping {
   public void testMultiplePagesMatchUnorderedColumnExpressionIn() {
     // Parquet In predicate is internally transformed into `zv <= x <= zzz`.
     Expression filter = Expressions.in("_string", "zv", "zz", "zzz");
+
+    // row-group 1
+    // page-1                         0  2kcdhDuRL0Z46!zwp(...)LK2GpbAXN0.oRHABMh  zzBYX?HiWMlMn
+    // page-22                        0                                            zv
+    List<GenericData.Record> expected =
+        selectRecords(allRecords, Pair.of(608, 627), Pair.of(961, 981));
+    readAndValidate(filter, expected, rowGroup1);
+  }
+
+  @TestTemplate
+  public void testMultiplePagesMatchStringColumnStartsWith() {
+    // Parquet startsWith predicate is also tested using page min / max stats
+    Expression filter = Expressions.startsWith("_string", "zv");
 
     // row-group 1
     // page-1                         0  2kcdhDuRL0Z46!zwp(...)LK2GpbAXN0.oRHABMh  zzBYX?HiWMlMn
@@ -500,6 +524,48 @@ public class TestSparkParquetPageSkipping {
   public void testMultipleRowGroupsMatchUnorderedColumnExpressionIn() {
     // Parquet In predicate is internally transformed into `zr <= x <= zz`.
     Expression filter = Expressions.in("_string", "zr", "zu", "zz");
+
+    // row-group 0
+    // page-4                         1  !NW2pxFIaLmcU6MFNtJ1NOfoszz
+    // zuksdiwHNcjyiG0IE(...)2NjaAxQ?KC8D!L7u9Q
+    // row-group 1
+    // page-1                         0  2kcdhDuRL0Z46!zwp(...)LK2GpbAXN0.oRHABMh  zzBYX?HiWMlMn
+    // page-6                         0                                            zrUjt9c8TKodv
+    // page-22                        0                                            zv
+    List<GenericData.Record> expected =
+        selectRecords(
+            allRecords, Pair.of(78, 92), Pair.of(608, 627), Pair.of(687, 706), Pair.of(961, 981));
+    readAndValidate(filter, expected, allRecords);
+  }
+
+  @TestTemplate
+  public void testMultipleRowGroupsMatchStringColumnExpressionStartsWith() {
+    // Parquet startsWith predicate is also tested using page min / max stats
+    Expression filter = Expressions.startsWith("_string", "zr");
+
+    // row-group 0
+    // page-4                         1  !NW2pxFIaLmcU6MFNtJ1NOfoszz
+    // zuksdiwHNcjyiG0IE(...)2NjaAxQ?KC8D!L7u9Q
+    // row-group 1
+    // page-1                         0  2kcdhDuRL0Z46!zwp(...)LK2GpbAXN0.oRHABMh  zzBYX?HiWMlMn
+    // page-6                         0                                            zrUjt9c8TKodv
+    // page-22                        0                                            zv
+    List<GenericData.Record> expected =
+        selectRecords(
+            allRecords, Pair.of(78, 92), Pair.of(608, 627), Pair.of(687, 706), Pair.of(961, 981));
+    readAndValidate(filter, expected, allRecords);
+  }
+
+  @TestTemplate
+  public void testMultipleRowGroupsMatchStringColumnComplexExpression() {
+    // Parquet startsWith predicate is also tested using page min / max stats
+    Expression filter =
+        Expressions.or(
+            Expressions.and(
+                Expressions.or(
+                    Expressions.startsWith("_string", "zr"), Expressions.in("_string", "zu")),
+                Expressions.notStartsWith("_string", "zz")),
+            Expressions.equal("_string", "zv"));
 
     // row-group 0
     // page-4                         1  !NW2pxFIaLmcU6MFNtJ1NOfoszz

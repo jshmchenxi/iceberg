@@ -18,7 +18,9 @@
  */
 package org.apache.iceberg.parquet;
 
+import java.io.Serializable;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Set;
 import org.apache.iceberg.Schema;
@@ -37,8 +39,11 @@ import org.apache.parquet.filter2.compat.FilterCompat;
 import org.apache.parquet.filter2.predicate.FilterApi;
 import org.apache.parquet.filter2.predicate.FilterPredicate;
 import org.apache.parquet.filter2.predicate.Operators;
+import org.apache.parquet.filter2.predicate.Statistics;
+import org.apache.parquet.filter2.predicate.UserDefinedPredicate;
 import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveComparator;
 import org.apache.parquet.schema.PrimitiveType;
 
 class ParquetFilters {
@@ -205,6 +210,20 @@ class ParquetFilters {
               getParquetPrimitive(lit),
               getParquetPrimitiveSet(litSet));
         case STRING:
+          switch (op) {
+            case STARTS_WITH:
+              return FilterApi.userDefined(
+                  FilterApi.binaryColumn(path), new StartsWithPredicate((String) lit.value()));
+            case NOT_STARTS_WITH:
+              return FilterApi.userDefined(
+                  FilterApi.binaryColumn(path), new NotStartsWithPredicate((String) lit.value()));
+            default:
+              return pred(
+                  op,
+                  FilterApi.binaryColumn(path),
+                  getParquetPrimitive(lit),
+                  getParquetPrimitiveSet(litSet));
+          }
         case UUID:
         case FIXED:
         case BINARY:
@@ -383,6 +402,96 @@ class ParquetFilters {
     @Override
     public <R> R accept(Visitor<R> visitor) {
       throw new UnsupportedOperationException("AlwaysTrue is a placeholder only");
+    }
+  }
+
+  private static class StartsWithPredicate extends UserDefinedPredicate<Binary>
+      implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final String prefix;
+    private final Binary strToBinary;
+    private final int size;
+
+    StartsWithPredicate(String prefix) {
+      this.prefix = prefix;
+      this.strToBinary = Binary.fromReusedByteArray(prefix.getBytes(StandardCharsets.UTF_8));
+      this.size = strToBinary.length();
+    }
+
+    @Override
+    public boolean canDrop(Statistics<Binary> statistics) {
+      PrimitiveComparator<Binary> comparator =
+          PrimitiveComparator.UNSIGNED_LEXICOGRAPHICAL_BINARY_COMPARATOR;
+      Binary max = statistics.getMax();
+      Binary min = statistics.getMin();
+
+      return comparator.compare(max.slice(0, Math.min(size, max.length())), strToBinary) < 0
+          || comparator.compare(min.slice(0, Math.min(size, min.length())), strToBinary) > 0;
+    }
+
+    @Override
+    public boolean inverseCanDrop(Statistics<Binary> statistics) {
+      PrimitiveComparator<Binary> comparator =
+          PrimitiveComparator.UNSIGNED_LEXICOGRAPHICAL_BINARY_COMPARATOR;
+      Binary max = statistics.getMax();
+      Binary min = statistics.getMin();
+
+      return comparator.compare(max.slice(0, Math.min(size, max.length())), strToBinary) == 0
+          && comparator.compare(min.slice(0, Math.min(size, min.length())), strToBinary) == 0;
+    }
+
+    @Override
+    public boolean keep(Binary value) {
+      if (value == null) {
+        return false;
+      }
+      return value.toStringUsingUTF8().startsWith(prefix);
+    }
+  }
+
+  private static class NotStartsWithPredicate extends UserDefinedPredicate<Binary>
+      implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final String prefix;
+    private final Binary strToBinary;
+    private final int size;
+
+    NotStartsWithPredicate(String prefix) {
+      this.prefix = prefix;
+      this.strToBinary = Binary.fromReusedByteArray(prefix.getBytes(StandardCharsets.UTF_8));
+      this.size = strToBinary.length();
+    }
+
+    @Override
+    public boolean canDrop(Statistics<Binary> statistics) {
+      PrimitiveComparator<Binary> comparator =
+          PrimitiveComparator.UNSIGNED_LEXICOGRAPHICAL_BINARY_COMPARATOR;
+      Binary max = statistics.getMax();
+      Binary min = statistics.getMin();
+
+      return comparator.compare(max.slice(0, Math.min(size, max.length())), strToBinary) == 0
+          && comparator.compare(min.slice(0, Math.min(size, min.length())), strToBinary) == 0;
+    }
+
+    @Override
+    public boolean inverseCanDrop(Statistics<Binary> statistics) {
+      PrimitiveComparator<Binary> comparator =
+          PrimitiveComparator.UNSIGNED_LEXICOGRAPHICAL_BINARY_COMPARATOR;
+      Binary max = statistics.getMax();
+      Binary min = statistics.getMin();
+
+      return comparator.compare(max.slice(0, Math.min(size, max.length())), strToBinary) < 0
+          || comparator.compare(min.slice(0, Math.min(size, min.length())), strToBinary) > 0;
+    }
+
+    @Override
+    public boolean keep(Binary value) {
+      if (value == null) {
+        return false;
+      }
+      return !value.toStringUsingUTF8().startsWith(prefix);
     }
   }
 }
