@@ -19,6 +19,7 @@
 package org.apache.iceberg.parquet;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.function.Function;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.exceptions.RuntimeIOException;
@@ -33,8 +34,11 @@ import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.column.page.PageReadStore;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.schema.MessageType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ParquetReader<T> extends CloseableGroup implements CloseableIterable<T> {
+  private static final Logger LOG = LoggerFactory.getLogger(ParquetReader.class);
   private final InputFile input;
   private final Schema expectedSchema;
   private final ParquetReadOptions options;
@@ -146,10 +150,23 @@ public class ParquetReader<T> extends CloseableGroup implements CloseableIterabl
         throw new RuntimeIOException(e);
       }
 
-      nextRowGroupStart += pages.getRowCount();
-      nextRowGroup += 1;
+      if (pages == null) {
+        LOG.warn(
+            "Skip null pages returned by `reader.readFilteredRowGroup(nextRowGroup)`: shouldSkip={}, totalValues={}, nextRowGroup={}, nextRowGroupStart={}, valuesRead={}",
+            Arrays.toString(shouldSkip),
+            totalValues,
+            nextRowGroup,
+            nextRowGroupStart,
+            valuesRead);
 
-      model.setPageSource(pages);
+        nextRowGroup += 1;
+        advance();
+      } else {
+        nextRowGroupStart += pages.getRowCount();
+        nextRowGroup += 1;
+
+        model.setPageSource(pages);
+      }
     }
 
     @Override
