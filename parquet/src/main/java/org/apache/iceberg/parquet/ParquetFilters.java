@@ -176,6 +176,10 @@ class ParquetFilters {
         case BOOLEAN:
           Operators.BooleanColumn col = FilterApi.booleanColumn(path);
           switch (op) {
+            case IS_NULL:
+              return FilterApi.eq(col, null);
+            case NOT_NULL:
+              return FilterApi.notEq(col, null);
             case EQ:
               return FilterApi.eq(col, getParquetPrimitive(lit));
             case NOT_EQ:
@@ -355,6 +359,8 @@ class ParquetFilters {
     Object value = lit.value();
     if (value instanceof Number) {
       return (C) value;
+    } else if (value instanceof Boolean) {
+      return (C) value;
     } else if (value instanceof CharSequence) {
       return (C) Binary.fromString(value.toString());
     } else if (value instanceof ByteBuffer) {
@@ -374,6 +380,8 @@ class ParquetFilters {
     Set<C> convertedSet = Sets.newHashSet();
     for (Object value : litSet) {
       if (value instanceof Number) {
+        convertedSet.add((C) value);
+      } else if (value instanceof Boolean) {
         convertedSet.add((C) value);
       } else if (value instanceof CharSequence) {
         convertedSet.add((C) Binary.fromString(value.toString()));

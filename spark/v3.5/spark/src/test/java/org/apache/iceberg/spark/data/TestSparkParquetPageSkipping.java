@@ -613,8 +613,29 @@ public class TestSparkParquetPageSkipping {
   }
 
   @TestTemplate
+  public void testNoRowsMatchBooleanIsNull() {
+    Expression filter = Expressions.isNull("_bool");
+
+    readAndValidate(filter, ImmutableList.of(), ImmutableList.of());
+  }
+
+  @TestTemplate
   public void testAllRowsMatch() {
     Expression filter = Expressions.greaterThanOrEqual("_long", Long.MIN_VALUE);
+    readAndValidate(filter, allRecords, allRecords);
+  }
+
+  @TestTemplate
+  public void testAllRowsMatchBooleanEqual() {
+    Expression filter = Expressions.equal("_bool", true);
+
+    readAndValidate(filter, allRecords, allRecords);
+  }
+
+  @TestTemplate
+  public void testAllRowsMatchBooleanNotNull() {
+    Expression filter = Expressions.notNull("_bool");
+
     readAndValidate(filter, allRecords, allRecords);
   }
 
