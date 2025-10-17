@@ -110,6 +110,12 @@ project(":iceberg-spark:iceberg-spark-${sparkMajorVersion}_${scalaVersion}") {
     testImplementation (project(path: ':iceberg-open-api', configuration: 'testFixturesRuntimeElements')) {
       transitive = false
     }
+    testImplementation(libs.parquet.avro) {
+      exclude group: 'org.apache.avro', module: 'avro'
+      // already shaded by Parquet
+      exclude group: 'it.unimi.dsi'
+      exclude group: 'org.codehaus.jackson'
+    }
     testImplementation libs.sqlite.jdbc
     testImplementation libs.awaitility
     // runtime dependencies for running REST Catalog based integration test
