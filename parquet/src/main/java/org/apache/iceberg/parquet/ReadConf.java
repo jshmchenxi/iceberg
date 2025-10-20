@@ -19,6 +19,7 @@
 package org.apache.iceberg.parquet;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,10 +33,12 @@ import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.parquet.ParquetReadOptions;
+import org.apache.parquet.filter2.compat.FilterCompat;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnPath;
+import org.apache.parquet.internal.filter2.columnindex.RowRanges;
 import org.apache.parquet.schema.MessageType;
 
 /**
@@ -59,7 +62,7 @@ class ReadConf<T> {
   // List of column chunk metadata for each row group
   private final List<Map<ColumnPath, ColumnChunkMetaData>> columnChunkMetaDataForRowGroups;
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings({"checkstyle:CyclomaticComplexity", "unchecked"})
   ReadConf(
       InputFile file,
       ParquetReadOptions options,
@@ -101,6 +104,10 @@ class ReadConf<T> {
     }
 
     long computedTotalValues = 0L;
+    long computedFilteredTotalValues = 0L;
+    boolean shouldSkipColumnIndexFilter =
+        !options.useColumnIndexFilter()
+            || !FilterCompat.isFilteringRequired(options.getRecordFilter());
     for (int i = 0; i < shouldSkip.length; i += 1) {
       BlockMetaData rowGroup = rowGroups.get(i);
       boolean shouldRead =
@@ -113,6 +120,11 @@ class ReadConf<T> {
       this.shouldSkip[i] = !shouldRead;
       if (shouldRead) {
         computedTotalValues += rowGroup.getRowCount();
+        if (shouldSkipColumnIndexFilter) {
+          computedFilteredTotalValues += rowGroup.getRowCount();
+        } else {
+          computedFilteredTotalValues += RowRangesReader.getRowRanges(reader, i).rowCount();
+        }
       }
     }
 
@@ -121,7 +133,7 @@ class ReadConf<T> {
       this.vectorizedModel = null;
       this.columnChunkMetaDataForRowGroups = null;
       if (options.useRecordFilter()) {
-        this.totalValues = reader.getFilteredRecordCount();
+        this.totalValues = computedFilteredTotalValues;
       } else {
         this.totalValues = computedTotalValues;
       }
@@ -224,5 +236,28 @@ class ReadConf<T> {
       }
     }
     return listBuilder.build();
+  }
+
+  private static class RowRangesReader {
+    private static final Method GET_ROW_RANGES_METHOD;
+
+    static {
+      try {
+        GET_ROW_RANGES_METHOD =
+            ParquetFileReader.class.getDeclaredMethod("getRowRanges", int.class);
+        GET_ROW_RANGES_METHOD.setAccessible(true);
+      } catch (NoSuchMethodException e) {
+        throw new IllegalStateException(
+            "Cannot find ParquetFileReader's internal getRowRanges method.", e);
+      }
+    }
+
+    static RowRanges getRowRanges(ParquetFileReader reader, int index) {
+      try {
+        return (RowRanges) GET_ROW_RANGES_METHOD.invoke(reader, index);
+      } catch (Exception e) {
+        throw new RuntimeException("Failed to get row ranges for row group " + index, e);
+      }
+    }
   }
 }

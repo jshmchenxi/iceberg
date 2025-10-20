@@ -28,7 +28,6 @@ import java.nio.ByteOrder;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.PrimitiveIterator;
 import java.util.UUID;
 import org.apache.iceberg.data.GenericRecord;
@@ -317,10 +316,7 @@ public class ParquetValueReaders {
                       new IllegalArgumentException(
                           "PageReadStore does not contain row index offset"));
       this.rowOffset = -1;
-      Optional<PrimitiveIterator.OfLong> optionalRowIndexes = pageStore.getRowIndexes();
-      if (optionalRowIndexes.isPresent()) {
-        this.rowIndexes = optionalRowIndexes.get();
-      }
+      this.rowIndexes = pageStore.getRowIndexes().orElse(null);
     }
   }
 
