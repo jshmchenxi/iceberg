@@ -28,6 +28,7 @@ import java.nio.ByteOrder;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.PrimitiveIterator;
 import java.util.UUID;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
@@ -283,11 +284,16 @@ public class ParquetValueReaders {
   private static class PositionReader implements ParquetValueReader<Long> {
     private long rowOffset = -1;
     private long rowGroupStart;
+    private PrimitiveIterator.OfLong rowIndexes;
 
     @Override
     public Long read(Long reuse) {
-      rowOffset = rowOffset + 1;
-      return rowGroupStart + rowOffset;
+      if (rowIndexes != null) {
+        return rowIndexes.nextLong();
+      } else {
+        rowOffset = rowOffset + 1;
+        return rowGroupStart + rowOffset;
+      }
     }
 
     @Override
@@ -310,6 +316,7 @@ public class ParquetValueReaders {
                       new IllegalArgumentException(
                           "PageReadStore does not contain row index offset"));
       this.rowOffset = -1;
+      this.rowIndexes = pageStore.getRowIndexes().orElse(null);
     }
   }
 
@@ -329,7 +336,7 @@ public class ParquetValueReaders {
 
     @Override
     public void setPageSource(PageReadStore pageStore) {
-      column.setPageSource(pageStore.getPageReader(desc));
+      column.setPageSource(pageStore.getPageReader(desc), pageStore.getRowIndexes());
     }
 
     @Override
@@ -869,6 +876,7 @@ public class ParquetValueReaders {
     private final ParquetValueReader<?>[] readers;
     private final TripleIterator<?> column;
     private final List<TripleIterator<?>> children;
+    private boolean topLevel = false;
 
     /**
      * @deprecated will be removed in 1.9.0; use {@link #StructReader(List)} instead.
@@ -896,6 +904,10 @@ public class ParquetValueReaders {
       this.column = firstNonNullColumn(children);
     }
 
+    public final void topLevel() {
+      this.topLevel = true;
+    }
+
     @Override
     public final void setPageSource(PageReadStore pageStore) {
       for (ParquetValueReader<?> reader : readers) {
@@ -910,6 +922,12 @@ public class ParquetValueReaders {
 
     @Override
     public final T read(T reuse) {
+      if (topLevel && column.needsSynchronizing()) {
+        for (TripleIterator<?> child : children) {
+          child.synchronize();
+        }
+      }
+
       I intermediate = newStructData(reuse);
 
       for (int i = 0; i < readers.length; i += 1) {

@@ -18,7 +18,11 @@
  */
 package org.apache.iceberg.parquet;
 
+import java.io.Serializable;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.Set;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.expressions.BoundPredicate;
 import org.apache.iceberg.expressions.BoundReference;
@@ -29,19 +33,27 @@ import org.apache.iceberg.expressions.ExpressionVisitors.ExpressionVisitor;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.expressions.UnboundPredicate;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.types.Type;
 import org.apache.parquet.filter2.compat.FilterCompat;
 import org.apache.parquet.filter2.predicate.FilterApi;
 import org.apache.parquet.filter2.predicate.FilterPredicate;
 import org.apache.parquet.filter2.predicate.Operators;
+import org.apache.parquet.filter2.predicate.Statistics;
+import org.apache.parquet.filter2.predicate.UserDefinedPredicate;
 import org.apache.parquet.io.api.Binary;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveComparator;
+import org.apache.parquet.schema.PrimitiveType;
 
 class ParquetFilters {
 
   private ParquetFilters() {}
 
-  static FilterCompat.Filter convert(Schema schema, Expression expr, boolean caseSensitive) {
+  static FilterCompat.Filter convert(
+      MessageType mType, Schema schema, Expression expr, boolean caseSensitive) {
     FilterPredicate pred =
-        ExpressionVisitors.visit(expr, new ConvertFilterToParquet(schema, caseSensitive));
+        ExpressionVisitors.visit(expr, new ConvertFilterToParquet(mType, schema, caseSensitive));
     // TODO: handle AlwaysFalse.INSTANCE
     if (pred != null && pred != AlwaysTrue.INSTANCE) {
       // FilterCompat will apply LogicalInverseRewriter
@@ -51,11 +63,17 @@ class ParquetFilters {
     }
   }
 
+  static FilterCompat.Filter convert(Schema schema, Expression expr, boolean caseSensitive) {
+    return convert(null, schema, expr, caseSensitive);
+  }
+
   private static class ConvertFilterToParquet extends ExpressionVisitor<FilterPredicate> {
+    private final MessageType mType;
     private final Schema schema;
     private final boolean caseSensitive;
 
-    private ConvertFilterToParquet(Schema schema, boolean caseSensitive) {
+    private ConvertFilterToParquet(MessageType mType, Schema schema, boolean caseSensitive) {
+      this.mType = mType;
       this.schema = schema;
       this.caseSensitive = caseSensitive;
     }
@@ -119,18 +137,49 @@ class ParquetFilters {
       BoundReference<T> ref = (BoundReference<T>) pred.term();
       String path = schema.idToAlias(ref.fieldId());
       Literal<T> lit;
+      Set<T> litSet;
       if (pred.isUnaryPredicate()) {
         lit = null;
+        litSet = null;
       } else if (pred.isLiteralPredicate()) {
         lit = pred.asLiteralPredicate().literal();
+        litSet = null;
+      } else if (pred.isSetPredicate()) {
+        lit = null;
+        litSet = pred.asSetPredicate().literalSet();
       } else {
         throw new UnsupportedOperationException("Cannot convert to Parquet filter: " + pred);
+      }
+
+      String errMsg = "Cannot convert to Parquet filter: " + pred;
+      if (mType != null) {
+        // We create a Parquet filter predicate and that predicate uses a Parquet column.
+        // We need to ensure that the Parquet column type converted from the Iceberg type of
+        // the column matches the Parquet type in the Parquet file. (If the filter is passed
+        // to Parquet and used by Parquet to filter row groups, Parquet checks that the type
+        // in the predicate matches the type in the file as a validation step before filtering.)
+        // If the two do not match, we abort the conversion.
+        org.apache.parquet.schema.Type pType = mType.getType(path);
+        if (!(pType instanceof PrimitiveType)) {
+          throw new UnsupportedOperationException(errMsg);
+        } else {
+          PrimitiveType.PrimitiveTypeName typeName = ((PrimitiveType) pType).getPrimitiveTypeName();
+          String expected = predicateType(typeName);
+          String actual = predicateType(ref.type().typeId());
+          if (!actual.equals(expected)) {
+            throw new UnsupportedOperationException(errMsg);
+          }
+        }
       }
 
       switch (ref.type().typeId()) {
         case BOOLEAN:
           Operators.BooleanColumn col = FilterApi.booleanColumn(path);
           switch (op) {
+            case IS_NULL:
+              return FilterApi.eq(col, null);
+            case NOT_NULL:
+              return FilterApi.notEq(col, null);
             case EQ:
               return FilterApi.eq(col, getParquetPrimitive(lit));
             case NOT_EQ:
@@ -139,24 +188,106 @@ class ParquetFilters {
           break;
         case INTEGER:
         case DATE:
-          return pred(op, FilterApi.intColumn(path), getParquetPrimitive(lit));
+          return pred(
+              op,
+              FilterApi.intColumn(path),
+              getParquetPrimitive(lit),
+              getParquetPrimitiveSet(litSet));
         case LONG:
         case TIME:
         case TIMESTAMP:
-          return pred(op, FilterApi.longColumn(path), getParquetPrimitive(lit));
+          return pred(
+              op,
+              FilterApi.longColumn(path),
+              getParquetPrimitive(lit),
+              getParquetPrimitiveSet(litSet));
         case FLOAT:
-          return pred(op, FilterApi.floatColumn(path), getParquetPrimitive(lit));
+          return pred(
+              op,
+              FilterApi.floatColumn(path),
+              getParquetPrimitive(lit),
+              getParquetPrimitiveSet(litSet));
         case DOUBLE:
-          return pred(op, FilterApi.doubleColumn(path), getParquetPrimitive(lit));
+          return pred(
+              op,
+              FilterApi.doubleColumn(path),
+              getParquetPrimitive(lit),
+              getParquetPrimitiveSet(litSet));
+        case STRING:
+          switch (op) {
+            case STARTS_WITH:
+              return FilterApi.userDefined(
+                  FilterApi.binaryColumn(path), new StartsWithPredicate((String) lit.value()));
+            case NOT_STARTS_WITH:
+              return FilterApi.userDefined(
+                  FilterApi.binaryColumn(path), new NotStartsWithPredicate((String) lit.value()));
+            default:
+              return pred(
+                  op,
+                  FilterApi.binaryColumn(path),
+                  getParquetPrimitive(lit),
+                  getParquetPrimitiveSet(litSet));
+          }
+        case UUID:
+        case FIXED:
+        case BINARY:
+        case DECIMAL:
+          return pred(
+              op,
+              FilterApi.binaryColumn(path),
+              getParquetPrimitive(lit),
+              getParquetPrimitiveSet(litSet));
+      }
+
+      throw new UnsupportedOperationException(errMsg);
+    }
+
+    private String predicateType(PrimitiveType.PrimitiveTypeName typeName) {
+      switch (typeName) {
+        case BOOLEAN:
+          return "boolean";
+        case INT32:
+          return "int";
+        case INT64:
+          return "long";
+        case FLOAT:
+          return "float";
+        case DOUBLE:
+          return "double";
+        case INT96:
+        case FIXED_LEN_BYTE_ARRAY:
+        case BINARY:
+          return "binary";
+        default:
+          return "unsupported";
+      }
+    }
+
+    private String predicateType(Type.TypeID typeId) {
+      switch (typeId) {
+        case BOOLEAN:
+          return "boolean";
+        case INTEGER:
+        case DATE:
+          return "int";
+        case LONG:
+        case TIME:
+        case TIMESTAMP:
+        case TIMESTAMP_NANO:
+          return "long";
+        case FLOAT:
+          return "float";
+        case DOUBLE:
+          return "double";
         case STRING:
         case UUID:
         case FIXED:
         case BINARY:
         case DECIMAL:
-          return pred(op, FilterApi.binaryColumn(path), getParquetPrimitive(lit));
+          return "binary";
+        default:
+          return "unsupported";
       }
-
-      throw new UnsupportedOperationException("Cannot convert to Parquet filter: " + pred);
     }
 
     @Override
@@ -175,7 +306,7 @@ class ParquetFilters {
 
   @SuppressWarnings("checkstyle:MethodTypeParameterName")
   private static <C extends Comparable<C>, COL extends Operators.Column<C> & Operators.SupportsLtGt>
-      FilterPredicate pred(Operation op, COL col, C value) {
+      FilterPredicate pred(Operation op, COL col, C value, Set<C> valueSet) {
     switch (op) {
       case IS_NULL:
         return FilterApi.eq(col, null);
@@ -209,6 +340,10 @@ class ParquetFilters {
         return FilterApi.lt(col, value);
       case LT_EQ:
         return FilterApi.ltEq(col, value);
+      case IN:
+        return FilterApi.in(col, valueSet);
+      case NOT_IN:
+        return FilterApi.notIn(col, valueSet);
       default:
         throw new UnsupportedOperationException("Unsupported predicate operation: " + op);
     }
@@ -223,7 +358,9 @@ class ParquetFilters {
     // TODO: this needs to convert to handle BigDecimal and UUID
     Object value = lit.value();
     if (value instanceof Number) {
-      return (C) lit.value();
+      return (C) value;
+    } else if (value instanceof Boolean) {
+      return (C) value;
     } else if (value instanceof CharSequence) {
       return (C) Binary.fromString(value.toString());
     } else if (value instanceof ByteBuffer) {
@@ -231,6 +368,31 @@ class ParquetFilters {
     }
     throw new UnsupportedOperationException(
         "Type not supported yet: " + value.getClass().getName());
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <C extends Comparable<C>> Set<C> getParquetPrimitiveSet(Set<?> litSet) {
+    if (litSet == null) {
+      return Collections.emptySet();
+    }
+
+    // TODO: this needs to convert to handle BigDecimal and UUID
+    Set<C> convertedSet = Sets.newHashSet();
+    for (Object value : litSet) {
+      if (value instanceof Number) {
+        convertedSet.add((C) value);
+      } else if (value instanceof Boolean) {
+        convertedSet.add((C) value);
+      } else if (value instanceof CharSequence) {
+        convertedSet.add((C) Binary.fromString(value.toString()));
+      } else if (value instanceof ByteBuffer) {
+        convertedSet.add((C) Binary.fromReusedByteBuffer((ByteBuffer) value));
+      } else {
+        throw new UnsupportedOperationException(
+            "Type not supported yet: " + value.getClass().getName());
+      }
+    }
+    return convertedSet;
   }
 
   private static class AlwaysTrue implements FilterPredicate {
@@ -248,6 +410,96 @@ class ParquetFilters {
     @Override
     public <R> R accept(Visitor<R> visitor) {
       throw new UnsupportedOperationException("AlwaysTrue is a placeholder only");
+    }
+  }
+
+  private static class StartsWithPredicate extends UserDefinedPredicate<Binary>
+      implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final String prefix;
+    private final Binary strToBinary;
+    private final int size;
+
+    StartsWithPredicate(String prefix) {
+      this.prefix = prefix;
+      this.strToBinary = Binary.fromReusedByteArray(prefix.getBytes(StandardCharsets.UTF_8));
+      this.size = strToBinary.length();
+    }
+
+    @Override
+    public boolean canDrop(Statistics<Binary> statistics) {
+      PrimitiveComparator<Binary> comparator =
+          PrimitiveComparator.UNSIGNED_LEXICOGRAPHICAL_BINARY_COMPARATOR;
+      Binary max = statistics.getMax();
+      Binary min = statistics.getMin();
+
+      return comparator.compare(max.slice(0, Math.min(size, max.length())), strToBinary) < 0
+          || comparator.compare(min.slice(0, Math.min(size, min.length())), strToBinary) > 0;
+    }
+
+    @Override
+    public boolean inverseCanDrop(Statistics<Binary> statistics) {
+      PrimitiveComparator<Binary> comparator =
+          PrimitiveComparator.UNSIGNED_LEXICOGRAPHICAL_BINARY_COMPARATOR;
+      Binary max = statistics.getMax();
+      Binary min = statistics.getMin();
+
+      return comparator.compare(max.slice(0, Math.min(size, max.length())), strToBinary) == 0
+          && comparator.compare(min.slice(0, Math.min(size, min.length())), strToBinary) == 0;
+    }
+
+    @Override
+    public boolean keep(Binary value) {
+      if (value == null) {
+        return false;
+      }
+      return value.toStringUsingUTF8().startsWith(prefix);
+    }
+  }
+
+  private static class NotStartsWithPredicate extends UserDefinedPredicate<Binary>
+      implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final String prefix;
+    private final Binary strToBinary;
+    private final int size;
+
+    NotStartsWithPredicate(String prefix) {
+      this.prefix = prefix;
+      this.strToBinary = Binary.fromReusedByteArray(prefix.getBytes(StandardCharsets.UTF_8));
+      this.size = strToBinary.length();
+    }
+
+    @Override
+    public boolean canDrop(Statistics<Binary> statistics) {
+      PrimitiveComparator<Binary> comparator =
+          PrimitiveComparator.UNSIGNED_LEXICOGRAPHICAL_BINARY_COMPARATOR;
+      Binary max = statistics.getMax();
+      Binary min = statistics.getMin();
+
+      return comparator.compare(max.slice(0, Math.min(size, max.length())), strToBinary) == 0
+          && comparator.compare(min.slice(0, Math.min(size, min.length())), strToBinary) == 0;
+    }
+
+    @Override
+    public boolean inverseCanDrop(Statistics<Binary> statistics) {
+      PrimitiveComparator<Binary> comparator =
+          PrimitiveComparator.UNSIGNED_LEXICOGRAPHICAL_BINARY_COMPARATOR;
+      Binary max = statistics.getMax();
+      Binary min = statistics.getMin();
+
+      return comparator.compare(max.slice(0, Math.min(size, max.length())), strToBinary) < 0
+          || comparator.compare(min.slice(0, Math.min(size, min.length())), strToBinary) > 0;
+    }
+
+    @Override
+    public boolean keep(Binary value) {
+      if (value == null) {
+        return false;
+      }
+      return !value.toStringUsingUTF8().startsWith(prefix);
     }
   }
 }
